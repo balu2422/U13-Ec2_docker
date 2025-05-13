@@ -1,23 +1,39 @@
 variable "aws_region" {
-  default = "us-east-1"
+  type        = string
+  description = "AWS region"
 }
 
 variable "name_prefix" {
-  default = "docker-demo"
+  type        = string
+  description = "Prefix for naming AWS resources"
 }
 
 variable "vpc_cidr" {
-  default = "10.0.0.0/16"
+  type        = string
+  description = "CIDR block for the VPC"
 }
 
 variable "public_subnet_cidr" {
-  default = "10.0.1.0/24"
+  type        = string
+  description = "CIDR block for the public subnet"
 }
 
 variable "availability_zone" {
-  default = "us-east-1a"
+  type        = string
+  description = "Availability zone to launch resources"
 }
 
-variable "ami_id" {}
-variable "instance_type" {}
-variable "key_name" {}
+variable "ami_id" {
+  type        = string
+  description = "AMI ID to use for EC2 instances"
+}
+
+variable "instance_type" {
+  type        = string
+  description = "EC2 instance type"
+}
+
+variable "key_name" {
+  type        = string
+  description = "Name of the SSH key pair"
+}
