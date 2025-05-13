@@ -1,4 +1,4 @@
-# U13-Ec2_docker
+# U13-Ec2_docker-nginx
 Provisioning an EC2 Instance with Terraform and Installing Docker and deploy web application.
 
 <!-- BEGIN_TF_DOCS -->
