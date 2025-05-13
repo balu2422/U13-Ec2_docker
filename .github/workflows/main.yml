@@ -41,6 +41,10 @@ jobs:
 
       - name: Terraform Init
         run: terraform init -reconfigure
+      - name: Terraform test
+        run: |
+         terraform test
+        continue-on-error: true
 
       - name: Terraform Format
         run: terraform fmt -recursive
