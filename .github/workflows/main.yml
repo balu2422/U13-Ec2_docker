@@ -41,9 +41,9 @@ jobs:
 
       - name: Terraform Init
         run: terraform init -reconfigure
-      - name: Terraform test
-        run: |
-         terraform test
+
+      - name: Terraform Test
+        run: terraform test
         continue-on-error: true
 
       - name: Terraform Format
@@ -52,7 +52,7 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-      - name: Terraform Plan
+      - name: Terraform Plan (non-dispatch)
         if: github.event_name != 'workflow_dispatch'
         run: terraform plan -var-file="terraform.tfvars"
 
@@ -93,6 +93,20 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           header: "Terraform Documentation"
           path: ./README.md
+
+      - name: Generate tfplan.json for OPA
+        run: |
+          terraform plan -var-file="terraform.tfvars" -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+
+      - name: Install Conftest
+        run: |
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.51.0/conftest_0.51.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.51.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin/
+
+      - name: Run OPA Policy Check
+        run: conftest test tfplan.json --policy policies/
 
       - name: Terraform Apply (on push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
