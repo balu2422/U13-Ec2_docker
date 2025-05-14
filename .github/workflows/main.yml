@@ -106,7 +106,7 @@ jobs:
           sudo mv conftest /usr/local/bin/
 
       - name: Run OPA Policy Check on Terraform Plan
-        run: conftest test --input terraformplan tfplan.json --policy policies/
+        run: conftest test --parser=terraformplan tfplan.json --policy policies/
 
       - name: Terraform Apply (on push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
