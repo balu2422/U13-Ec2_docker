@@ -43,8 +43,7 @@ jobs:
         run: terraform init -reconfigure
 
       - name: Terraform test
-        run: |
-          terraform test
+        run: terraform test
         continue-on-error: true
 
       - name: Terraform Format
@@ -53,11 +52,14 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-      - name: Terraform Plan
+      - name: Terraform Plan and Generate tfplan.json
         if: github.event_name != 'workflow_dispatch'
         run: |
           terraform plan -out=tfplan.binary -var-file="terraform.tfvars"
           terraform show -json tfplan.binary > tfplan.json
+
+      - name: Debug tfplan.json (first 20 lines)
+        run: head -n 20 tfplan.json
 
       - name: Lint Terraform Code with TFLint
         run: |
@@ -104,8 +106,7 @@ jobs:
           sudo mv conftest /usr/local/bin/
 
       - name: Run OPA Policy Check
-        run: |
-          conftest test tfplan.json --policy policies/
+        run: conftest test tfplan.json --policy policies/
 
       - name: Terraform Apply (on push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
