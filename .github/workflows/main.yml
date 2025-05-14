@@ -42,7 +42,7 @@ jobs:
       - name: Terraform Init
         run: terraform init -reconfigure
 
-      - name: Terraform test
+      - name: Terraform Test
         run: terraform test
         continue-on-error: true
 
@@ -52,6 +52,7 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
+      # ✅ Terraform Plan → tfplan.json
       - name: Terraform Plan and Generate tfplan.json
         if: github.event_name != 'workflow_dispatch'
         run: |
@@ -60,6 +61,16 @@ jobs:
 
       - name: Debug tfplan.json (first 20 lines)
         run: head -n 20 tfplan.json
+
+      # ✅ OPA Policy Check with Conftest (AFTER tfplan.json exists)
+      - name: Install Conftest
+        run: |
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.51.0/conftest_0.51.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.51.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin/
+
+      - name: Run OPA Policy Check
+        run: conftest test tfplan.json --policy policies/
 
       - name: Lint Terraform Code with TFLint
         run: |
@@ -94,19 +105,10 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2.9.0
         with:
-          working-dir: .
+          working-directory: .
           github_token: ${{ secrets.GITHUB_TOKEN }}
           header: "Terraform Documentation"
           path: ./README.md
-
-      - name: Install Conftest
-        run: |
-          wget https://github.com/open-policy-agent/conftest/releases/download/v0.51.0/conftest_0.51.0_Linux_x86_64.tar.gz
-          tar xzf conftest_0.51.0_Linux_x86_64.tar.gz
-          sudo mv conftest /usr/local/bin/
-
-      - name: Run OPA Policy Check
-        run: conftest test tfplan.json --policy policies/
 
       - name: Terraform Apply (on push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
