@@ -1,4 +1,4 @@
-name: Infra apply & destroy
+name: Terraform Apply & Destroy
 
 on:
   push:
@@ -42,12 +42,15 @@ jobs:
       - name: Terraform Init
         run: terraform init -reconfigure
 
+      - name: Terraform Format
+        run: terraform fmt -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
       - name: Terraform Plan (non-dispatch)
         if: github.event_name != 'workflow_dispatch'
         run: terraform plan -var-file="terraform.tfvars" -out=tfplan.binary
-
-      - name: Show the tfplan.json content for debugging
-        run: cat tfplan.json
 
       - name: Generate tfplan.json for OPA
         run: |
@@ -59,9 +62,11 @@ jobs:
           tar xzf conftest_0.51.0_Linux_x86_64.tar.gz
           sudo mv conftest /usr/local/bin/
 
-      - name: Run OPA Policy Check with Debugging
+      - name: Run OPA Policy Check with Conftest
         run: |
-          conftest test tfplan.json --policy policies/ --debug --parse terraformplan
+          # Ensure tfplan.json exists and is valid JSON before running conftest
+          cat tfplan.json
+          conftest test tfplan.json --policy policies/
 
       - name: Terraform Apply (on push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
