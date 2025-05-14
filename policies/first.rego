@@ -1,7 +1,8 @@
-package terraform.deny
-
-# Example: deny resources with public access
+package main
+import future.keywords.in
 deny[msg] {
-  input.resource_changes[_].change.after.tags["Environment"] == "public"
-  msg = "Public environment tags are not allowed"
+  some r in input.resource_changes
+  r.type == "aws_s3_bucket"
+  r.change.after.acl == "public-read"
+  msg := "S3 bucket is public!"
 }
