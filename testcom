@@ -1,0 +1,558 @@
+import json
+import boto3
+import csv
+import xml.etree.ElementTree as ET
+from io import StringIO
+from datetime import datetime, timedelta
+from typing import List, Dict
+import urllib.request
+import urllib.parse
+import urllib.error
+
+# AWS S3 client
+s3 = boto3.client("s3")
+
+# Configuration
+BUCKET_NAME = "bay-modeln-sandbox-landing-us-east-1"
+SOURCE_FOLDER = "Source/T-bill/"
+DEST_FOLDER = "USRMT/T-bill/"
+ARCHIVE_FOLDER = "Source/T-bill/archive/"
+DEFAULT_INVESTMENT_RATE_THRESHOLD = 0.0  # Fetch ALL data, no minimum threshold
+
+def fetch_auction_data_api(start_date: str, end_date: str = None) -> List[Dict]:
+    """
+    Fetch auction data from Treasury API for the specified date range.
+    Filters for Bill security type and 13-Week term only.
+    """
+    if not end_date:
+        end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # Try Treasury Fiscal Data API
+    try:
+        url = 'https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/auctions'
+        
+        # Build simplified filters: only essential parameters to avoid missing data
+        filters = []
+        
+        # Date range filter
+        filters.append(f'auction_date:gte:{start_date}')
+        if end_date != start_date:
+            filters.append(f'auction_date:lte:{end_date}')
+        
+        # Security type and term filters
+        filters.append('security_type:eq:Bill')
+        filters.append('original_security_term:eq:13-Week')
+        
+        # Simplified parameters - only essential ones
+        params = {
+            'filter': ','.join(filters)
+        }
+        
+        # Build the full URL with parameters
+        query_string = urllib.parse.urlencode(params)
+        full_url = f"{url}?{query_string}"
+        print(f"Calling Treasury API: {full_url}")
+        
+        # Create request with timeout
+        request = urllib.request.Request(full_url)
+        request.add_header('User-Agent', 'Mozilla/5.0 (compatible; AWS Lambda Treasury Data Fetcher)')
+        
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if response.getcode() == 200:
+                response_data = response.read().decode('utf-8')
+                data = json.loads(response_data)
+                auctions = data.get('data', [])
+                if auctions:
+                    print(f"Successfully fetched {len(auctions)} auctions from API")
+                    # Additional client-side filtering to ensure we only get Bills and 13-Week
+                    filtered_auctions = []
+                    for auction in auctions:
+                        security_type = auction.get('security_type', '').lower()
+                        security_term = auction.get('original_security_term', '') or auction.get('security_term', '')
+                        
+                        if 'bill' in security_type and '13' in str(security_term).lower():
+                            filtered_auctions.append(auction)
+                    
+                    print(f"After filtering for Bill/13-Week: {len(filtered_auctions)} auctions")
+                    return filtered_auctions
+                else:
+                    print("API returned no auction data")
+                
+    except Exception as e:
+        print(f"API request failed: {e}")
+    
+    return []
+
+def generate_treasury_auction_data() -> List[Dict]:
+    """
+    Fetch real Treasury Bill auction data from API for the last 2 years (for testing).
+    """
+    # Get current date and calculate 2 years back for more test data
+    today = datetime.now()
+    two_years_ago = (today - timedelta(days=730)).strftime('%Y-%m-%d')
+    
+    print(f"Fetching Treasury auction data from {two_years_ago} to {today.strftime('%Y-%m-%d')}")
+    
+    # Fetch real data from API
+    auctions = fetch_auction_data_api(two_years_ago)
+    
+    if not auctions:
+        print("No data from API, generating sample data as fallback")
+        # Fallback to sample data if API fails
+        return generate_sample_auction_data()
+    
+    return auctions
+
+def generate_sample_auction_data() -> List[Dict]:
+    """
+    Generate sample Treasury Bill auction data for the last 3 months as fallback.
+    Only includes Bill security type with 13-Week term.
+    """
+    sample_auctions = []
+    
+    # Get current date and calculate 3 months back
+    today = datetime.now()
+    three_months_ago = (today - timedelta(days=90)).strftime('%Y-%m-%d')
+    first_of_month_date = datetime.strptime(three_months_ago, '%Y-%m-%d').date()
+    
+    # Generate data for the last 3 months - only 13-Week Treasury Bills
+    for month_offset in range(3):
+        # Calculate the date for each month going back
+        target_date = today - timedelta(days=30 * month_offset)
+        year = target_date.year
+        month = target_date.month
+        
+        # Generate weekly auctions for each month - only 13-Week Treasury Bills
+        for week in range(1, 5):  # 4 weeks per month
+            auction_day = min(week * 7, 28)  # Don't exceed month boundaries
+            auction_date = f'{year}-{month:02d}-{auction_day:02d}'
+            
+            # Only include dates from 3 months ago onwards
+            auction_date_obj = datetime.strptime(auction_date, '%Y-%m-%d').date()
+            if auction_date_obj >= first_of_month_date:
+                sample_auctions.append({
+                    'auction_date': auction_date,
+                    'investment_rate': 4.85 - (month_offset * 0.1) - (week * 0.05),
+                    'cusip': f'91279{month}{week}L{auction_day}',
+                    'security_type': 'Bill',
+                    'original_security_term': '13-Week',
+                    'security_term': '13-Week'
+                })
+    
+    # Sort by date (newest first)
+    sample_auctions.sort(key=lambda x: x['auction_date'], reverse=True)
+    return sample_auctions
+
+def filter_bill_auctions(auctions: List[Dict]) -> List[Dict]:
+    """
+    Filter auctions to ensure only Bill security type with 13-Week term.
+    No investment rate threshold - gets ALL data.
+    """
+    filtered_auctions = []
+    
+    for auction in auctions:
+        try:
+            # Check if it's a Bill with 13-Week term
+            security_type = auction.get('security_type', '').lower()
+            security_term = auction.get('original_security_term', '') or auction.get('security_term', '')
+            
+            if 'bill' in security_type and '13' in str(security_term).lower():
+                # Include ALL Bills regardless of investment rate
+                filtered_auctions.append(auction)
+                
+        except (ValueError, TypeError):
+            # Skip auctions with invalid data
+            continue
+    
+    return filtered_auctions
+
+def extract_auction_info(auction: Dict) -> List[str]:
+    """
+    Extract only Date and Rate to match existing XML structure.
+    Returns [auction_date, investment_rate] only.
+    """
+    # Get investment rate from various possible fields
+    investment_rate_str = ''
+    rate_fields = [
+        'investment_rate', 'high_yield', 'interest_rate', 'yield', 
+        'high_investment_rate', 'avg_investment_rate', 'rate'
+    ]
+    
+    for field in rate_fields:
+        if field in auction and auction[field]:
+            try:
+                rate_value = auction[field]
+                if isinstance(rate_value, str):
+                    rate_value = rate_value.replace('%', '').strip()
+                # Store as plain number (no % sign to match existing XML)
+                investment_rate_str = f"{float(rate_value):.2f}"
+                break
+            except (ValueError, TypeError):
+                continue
+    
+    # Return ONLY date and rate to match existing XML structure
+    return [
+        auction.get('auction_date', ''),           # Auction date
+        investment_rate_str                        # Investment rate (plain number)
+    ]
+
+def validate_auction_data(auction_data: List[List[str]]) -> bool:
+    """
+    Validate that auction data has no null/empty values in required columns.
+    Only validates Date and Rate (matches existing XML structure).
+    """
+    if not auction_data:
+        print("No auction data to validate")
+        return False
+    
+    for i, row in enumerate(auction_data):
+        if len(row) < 2:
+            print(f"Row {i+1}: Insufficient columns (has {len(row)}, needs 2)")
+            return False
+        
+        # Check only Date and Rate (first 2 columns)
+        auction_date, investment_rate = row[0], row[1]
+        
+        if not auction_date or auction_date.strip() == '':
+            print(f"Row {i+1}: Missing auction_date")
+            return False
+        if not investment_rate or investment_rate.strip() == '':
+            print(f"Row {i+1}: Missing investment_rate")
+            return False
+    
+    print(f"Data validation passed: {len(auction_data)} rows are valid")
+    return True
+
+def create_treasury_data() -> List[List[str]]:
+    """
+    Create list of lists with current Treasury auction data.
+    """
+    # Generate auction data
+    auctions = generate_treasury_auction_data()
+    
+    # Filter for Bill auctions (ALL data, no rate threshold)
+    bill_auctions = filter_bill_auctions(auctions)
+    
+    # Extract auction info
+    auction_data = [extract_auction_info(auction) for auction in bill_auctions]
+    
+    return auction_data
+
+def read_s3_xml(bucket: str, key: str) -> List[List[str]]:
+    """Read XML file from S3, matches existing TimeSeriesEntry format."""
+    try:
+        print(f"Reading existing data from s3://{bucket}/{key}")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        content = obj["Body"].read().decode('utf-8')
+        
+        # Parse XML content
+        root = ET.fromstring(content)
+        rows = []
+        
+        # Extract data from TimeSeriesEntry elements
+        for entry in root.findall('.//TimeSeriesEntry'):
+            entry_date = entry.get('EntryStartDate', '')
+            entry_value = entry.get('EntryValue', '')
+            
+            # Convert date format if needed (remove time part)
+            if entry_date and ' ' in entry_date:
+                entry_date = entry_date.split(' ')[0]  # Keep only date part
+            
+            if entry_date and entry_value:
+                row = [entry_date, entry_value]
+                rows.append(row)
+        
+        print(f"Found {len(rows)} existing rows")
+        return rows
+        
+    except s3.exceptions.NoSuchKey:
+        print(f"File s3://{bucket}/{key} does not exist, starting with empty data")
+        return []
+    except ET.ParseError as e:
+        print(f"Error parsing XML: {str(e)}")
+        return []
+    except Exception as e:
+        print(f"Error reading from S3: {str(e)}")
+        return []
+
+def write_s3_xml(data: List[List[str]], bucket: str, key: str):
+    """Write data to S3 in TimeSeriesEntry XML format to match existing structure."""
+    try:
+        # Create XML content matching existing structure
+        root = ET.Element("Entries")
+        timeseries = ET.SubElement(root, "TimeSeries")
+        timeseries.set("EntryFrequency", "WKLY")
+        timeseries.set("OwnerName", "root")
+        timeseries.set("RevisionNumber", "1")
+        timeseries.set("TimeSeriesName", "T-Bill")
+        
+        for row in data:
+            if len(row) >= 2:  # Only need date and rate
+                entry_date = str(row[0]) if row[0] else ''
+                entry_value = str(row[1]) if row[1] else ''
+                
+                # Add time component to match existing format
+                if entry_date and ' ' not in entry_date:
+                    entry_date = f"{entry_date} 00:00:00"
+                
+                entry = ET.SubElement(timeseries, "TimeSeriesEntry")
+                entry.set("EntryStartDate", entry_date)
+                entry.set("EntryValue", entry_value)
+        
+        # Convert to string with proper XML declaration and formatting
+        ET.indent(root, space="")  # Match existing format (no indentation)
+        xml_str = ET.tostring(root, encoding='unicode', method='xml')
+        xml_content = xml_str  # No XML declaration to match existing format
+        
+        # Upload to S3
+        s3.put_object(Bucket=bucket, Key=key, Body=xml_content.encode('utf-8'))
+        print(f"Successfully wrote {len(data)} rows to s3://{bucket}/{key}")
+        
+    except Exception as e:
+        print(f"Error writing to S3: {str(e)}")
+        raise
+
+def write_s3_csv(data: List[List[str]], bucket: str, key: str):
+    """Write list of lists to S3 as CSV."""
+    try:
+        # Create CSV content
+        csv_buffer = StringIO()
+        csv_writer = csv.writer(csv_buffer)
+        
+        # Write header for 2-column format
+        headers = ['Date', 'Rate']
+        csv_writer.writerow(headers)
+        
+        # Write data rows (only date and rate)
+        for row in data:
+            if len(row) >= 2:
+                csv_writer.writerow([row[0], row[1]])
+        
+        # Upload to S3
+        s3.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue())
+        print(f"Successfully wrote {len(data)} rows to s3://{bucket}/{key}")
+        
+    except Exception as e:
+        print(f"Error writing to S3: {str(e)}")
+        raise
+
+def get_current_xml_file(bucket: str, folder: str) -> str:
+    """
+    Find the current Tbill_*.xml file in the source folder.
+    Returns the key of the most recent file or None if not found.
+    """
+    try:
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=folder)
+        if 'Contents' not in response:
+            return None
+        
+        # Find Tbill_*.xml files
+        tbill_files = []
+        for obj in response['Contents']:
+            key = obj['Key']
+            if key.startswith(f"{folder}Tbill_") and key.endswith('.xml'):
+                tbill_files.append((key, obj['LastModified']))
+        
+        if not tbill_files:
+            return None
+        
+        # Return the most recent file
+        tbill_files.sort(key=lambda x: x[1], reverse=True)
+        return tbill_files[0][0]
+        
+    except Exception as e:
+        print(f"Error finding XML file: {e}")
+        return None
+
+def generate_timestamped_filename(prefix: str, extension: str) -> str:
+    """Generate filename with timestamp: Tbill_YYYYMMDD_HHMMSS.xml"""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f"{prefix}_{timestamp}.{extension}"
+
+def archive_file(bucket: str, source_key: str, archive_folder: str):
+    """Move file from source to archive folder"""
+    try:
+        # Extract filename from source key
+        filename = source_key.split('/')[-1]
+        archive_key = f"{archive_folder}{filename}"
+        
+        print(f"Archiving file: {source_key} -> {archive_key}")
+        
+        # Copy to archive
+        copy_response = s3.copy_object(
+            Bucket=bucket,
+            CopySource={'Bucket': bucket, 'Key': source_key},
+            Key=archive_key
+        )
+        print(f"Copy successful: {copy_response.get('ResponseMetadata', {}).get('HTTPStatusCode')}")
+        
+        # Delete from source
+        delete_response = s3.delete_object(Bucket=bucket, Key=source_key)
+        print(f"Delete successful: {delete_response.get('ResponseMetadata', {}).get('HTTPStatusCode')}")
+        print(f"Successfully archived {source_key} to {archive_key}")
+        
+    except Exception as e:
+        print(f"Error archiving file from {source_key} to {archive_folder}: {str(e)}")
+        raise
+
+def merge_and_update(existing_data: List[List[str]], new_data: List[List[str]]):
+    """
+    Merge new data with existing data, keeping only new rows.
+    Returns (merged_data, new_rows_count)
+    """
+    if not existing_data:
+        print("No existing data found, using all new data")
+        return new_data, len(new_data)
+    
+    if not new_data:
+        print("No new data to process")
+        return existing_data, 0
+    
+    # Create set of existing dates (only Date needed for 2-column data)
+    existing_dates = set()
+    for row in existing_data:
+        if len(row) >= 1 and row[0]:  # Ensure we have date
+            existing_dates.add(row[0])
+    
+    # Find new rows
+    new_rows = []
+    for row in new_data:
+        if len(row) >= 1 and row[0] and row[0] not in existing_dates:
+            new_rows.append(row)
+    
+    if new_rows:
+        print(f"Found {len(new_rows)} new rows to add")
+        # Combine existing and new data
+        merged_data = existing_data + new_rows
+        
+        # Sort by date (oldest first, newest last - chronological order)
+        merged_data.sort(key=lambda x: x[0] if x[0] else '', reverse=False)
+        
+        return merged_data, len(new_rows)
+    else:
+        print("No new rows found, returning existing data")
+        return existing_data, 0
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda handler function with enhanced error handling and data validation.
+    Archives old files only after successful completion.
+    """
+    current_xml_key = None
+    new_xml_key = None
+    new_usrmt_xml_key = None
+    
+    try:
+        print("Starting Treasury Bill data update process...")
+        
+        # 1. Generate current Treasury auction data (ALL data, no filtering)
+        print("Generating current Treasury auction data...")
+        new_data = create_treasury_data()
+        print(f"Generated {len(new_data)} new auction records")
+        
+        # 2. VALIDATE API DATA - Fail if any null values
+        print("Validating API data...")
+        if not validate_auction_data(new_data):
+            error_message = "API data validation failed: Found null or missing values in required columns"
+            print(f"Error: {error_message}")
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "error": error_message,
+                    "message": "API data is incorrect - contains null values",
+                    "timestamp": datetime.now().isoformat()
+                })
+            }
+        
+        # 3. Find existing XML file in source folder
+        print("Looking for existing XML file...")
+        current_xml_key = get_current_xml_file(BUCKET_NAME, SOURCE_FOLDER)
+        
+        existing_data = []
+        if current_xml_key:
+            print(f"Found existing file: {current_xml_key}")
+            existing_data = read_s3_xml(BUCKET_NAME, current_xml_key)
+        else:
+            print("No existing XML file found")
+        
+        # 4. Merge data (only add new rows)
+        updated_data, new_rows_count = merge_and_update(existing_data, new_data)
+        
+        if new_rows_count > 0:
+            print(f"Adding {new_rows_count} new rows to the dataset")
+            
+            # 5. Create new timestamped filenames (both XML files now)
+            new_xml_filename = generate_timestamped_filename("Tbill", "xml")
+            new_usrmt_xml_filename = generate_timestamped_filename("Tbill", "xml")
+            
+            new_xml_key = f"{SOURCE_FOLDER}{new_xml_filename}"
+            new_usrmt_xml_key = f"{DEST_FOLDER}{new_usrmt_xml_filename}"
+            
+            # 6. Write new files (this can fail, so do before archiving)
+            print(f"Creating new XML file: {new_xml_key}")
+            write_s3_xml(updated_data, BUCKET_NAME, new_xml_key)
+            
+            print(f"Creating new XML file for USRMT: {new_usrmt_xml_key}")
+            write_s3_xml(updated_data, BUCKET_NAME, new_usrmt_xml_key)
+            
+            # 7. ONLY NOW archive the old file (after successful file creation)
+            if current_xml_key:
+                print("Lambda executed successfully - now archiving old file...")
+                archive_file(BUCKET_NAME, current_xml_key, ARCHIVE_FOLDER)
+            
+            result_message = f"Treasury data updated successfully. Added {new_rows_count} new rows. Total rows: {len(updated_data)}. Files: {new_xml_filename}, {new_usrmt_xml_filename}"
+            
+        else:
+            result_message = f"No new data to update. Current dataset has {len(existing_data)} rows."
+            new_xml_filename = None
+            new_usrmt_xml_filename = None
+        
+        print(result_message)
+        
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": result_message,
+                "new_rows_added": new_rows_count,
+                "total_rows": len(updated_data),
+                "source_xml_file": new_xml_filename,
+                "usrmt_xml_file": new_usrmt_xml_filename,
+                "timestamp": datetime.now().isoformat()
+            })
+        }
+        
+    except Exception as e:
+        error_message = f"Lambda execution failed: {str(e)}"
+        print(f"Error: {error_message}")
+        
+        # Clean up any partially created files if error occurred
+        if new_xml_key:
+            try:
+                print(f"Cleaning up partially created source XML file: {new_xml_key}")
+                s3.delete_object(Bucket=BUCKET_NAME, Key=new_xml_key)
+            except:
+                pass
+        
+        if new_usrmt_xml_key:
+            try:
+                print(f"Cleaning up partially created USRMT XML file: {new_usrmt_xml_key}")
+                s3.delete_object(Bucket=BUCKET_NAME, Key=new_usrmt_xml_key)
+            except:
+                pass
+        
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "error": error_message,
+                "message": "Lambda failed - old files preserved, no archiving performed",
+                "timestamp": datetime.now().isoformat()
+            })
+        }
+
+# For local testing
+if __name__ == "__main__":
+    # Test the function locally
+    test_event = {}
+    test_context = {}
+    result = lambda_handler(test_event, test_context)
+    print("Test result:", json.dumps(result, indent=2))
